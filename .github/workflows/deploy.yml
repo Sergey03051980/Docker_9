@@ -1,0 +1,224 @@
+name: Docker-9 CI/CD Pipeline
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: test_db
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+      
+      redis:
+        image: redis:7-alpine
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 6379:6379
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Set up Python 3.11
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.11'
+        cache: 'poetry'
+    
+    - name: Install Poetry
+      run: |
+        curl -sSL https://install.python-poetry.org | python3 -
+        echo "$HOME/.local/bin" >> $GITHUB_PATH
+    
+    - name: Install dependencies
+      run: poetry install --with dev
+    
+    - name: Run migrations
+      env:
+        SECRET_KEY: ${{ secrets.SECRET_KEY || 'test-secret-key-for-ci' }}
+        DEBUG: "True"
+        DB_NAME: test_db
+        DB_USER: postgres
+        DB_PASSWORD: postgres
+        DB_HOST: localhost
+        DB_PORT: 5432
+        REDIS_URL: redis://localhost:6379/0
+        CELERY_BROKER_URL: redis://localhost:6379/0
+        ALLOWED_HOSTS: localhost,127.0.0.1
+      run: |
+        poetry run python manage.py migrate
+    
+    - name: Run Django tests
+      env:
+        SECRET_KEY: ${{ secrets.SECRET_KEY || 'test-secret-key-for-ci' }}
+        DEBUG: "True"
+        DB_NAME: test_db
+        DB_USER: postgres
+        DB_PASSWORD: postgres
+        DB_HOST: localhost
+        DB_PORT: 5432
+        REDIS_URL: redis://localhost:6379/0
+        CELERY_BROKER_URL: redis://localhost:6379/0
+        ALLOWED_HOSTS: localhost,127.0.0.1
+      run: |
+        poetry run python manage.py test
+    
+    - name: Check Django health
+      run: |
+        poetry run python manage.py check --deploy
+    
+    - name: Run custom tests (if any)
+      run: |
+        if [ -f "main.py" ]; then
+          echo "Running main.py tests..."
+          poetry run python -m pytest main.py -v || true
+        fi
+
+  docker-build-test:
+    runs-on: ubuntu-latest
+    needs: test
+    if: github.event_name == 'push'
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+    
+    - name: Build Docker image
+      run: |
+        docker build -t docker-9:test .
+    
+    - name: Test Docker Compose
+      run: |
+        docker-compose -f docker-compose.yaml config
+        docker-compose -f docker-compose.yaml build
+
+  deploy-staging:
+    runs-on: ubuntu-latest
+    needs: [test, docker-build-test]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/develop'
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Deploy to staging server
+      uses: appleboy/ssh-action@v1.0.0
+      with:
+        host: ${{ secrets.STAGING_HOST }}
+        username: ${{ secrets.STAGING_USER }}
+        key: ${{ secrets.SSH_PRIVATE_KEY }}
+        script: |
+          set -e
+          echo "🚀 Deploying to staging..."
+          cd /opt/docker-9/staging
+          git pull origin develop
+          docker-compose down
+          docker-compose pull || true
+          docker-compose up -d --build
+          echo "✅ Staging deployment complete!"
+
+  deploy-production:
+    runs-on: ubuntu-latest
+    needs: [test, docker-build-test]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Setup SSH
+      uses: webfactory/ssh-agent@v0.8.0
+      with:
+        ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
+    
+    - name: Add server to known hosts
+      run: |
+        mkdir -p ~/.ssh
+        ssh-keyscan -H ${{ secrets.PRODUCTION_HOST }} >> ~/.ssh/known_hosts
+    
+    - name: Deploy to production server
+      env:
+        SERVER_USER: ${{ secrets.PRODUCTION_USER }}
+        SERVER_HOST: ${{ secrets.PRODUCTION_HOST }}
+      run: |
+        # Создаем production .env файл
+        cat > .env.production << EOF
+        SECRET_KEY=${{ secrets.PRODUCTION_SECRET_KEY }}
+        DEBUG=False
+        ALLOWED_HOSTS=${{ secrets.ALLOWED_HOSTS }}
+        DB_NAME=${{ secrets.DB_NAME }}
+        DB_USER=${{ secrets.DB_USER }}
+        DB_PASSWORD=${{ secrets.DB_PASSWORD }}
+        DB_HOST=db
+        DB_PORT=5432
+        REDIS_URL=redis://redis:6379/0
+        CELERY_BROKER_URL=redis://redis:6379/0
+        EOF
+        
+        # Копируем файлы на сервер
+        rsync -avz -e "ssh -o StrictHostKeyChecking=no" \
+          --exclude='.git' \
+          --exclude='.venv' \
+          --exclude='__pycache__' \
+          --exclude='*.pyc' \
+          --exclude='db.sqlite3' \
+          --exclude='.env' \
+          . $SERVER_USER@$SERVER_HOST:/opt/docker-9/
+        
+        # Копируем .env файл
+        scp -o StrictHostKeyChecking=no .env.production $SERVER_USER@$SERVER_HOST:/opt/docker-9/.env
+        
+        # Выполняем деплой
+        ssh -o StrictHostKeyChecking=no $SERVER_USER@$SERVER_HOST << 'EOF'
+        set -e
+        
+        echo "🚀 Начинаем деплой в продакшн..."
+        
+        cd /opt/docker-9
+        
+        # Останавливаем и обновляем контейнеры
+        docker-compose down
+        docker-compose pull || true
+        docker-compose up -d --build
+        
+        # Ждем запуска и проверяем
+        sleep 15
+        docker-compose ps
+        docker-compose logs --tail=20
+        
+        # Проверяем health контейнеров
+        echo "Проверяем health контейнеров..."
+        for service in backend db redis celery celery-beat; do
+          if docker-compose ps $service | grep -q "Up"; then
+            echo "✅ $service запущен"
+          else
+            echo "❌ $service не запущен"
+            docker-compose logs $service --tail=30
+            exit 1
+          fi
+        done
+        
+        echo "✅ Продакшн деплой завершен успешно!"
+        EOF
