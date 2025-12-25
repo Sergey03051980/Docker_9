@@ -1,0 +1,26 @@
+[tool.poetry]
+name = "docker-9"
+version = "0.1.0"
+description = "Online Learning Platform with Docker"
+authors = ["Your Name <email@example.com>"]
+readme = "README.md"
+
+[tool.poetry.dependencies]
+python = ">=3.11,<4.0"
+Django = "^4.2"
+djangorestframework = "^3.14"
+django-cors-headers = "^4.3"
+celery = "^5.3"
+redis = "^4.6"
+psycopg2-binary = "^2.9"
+gunicorn = "^21.2"
+django-celery-beat = "^2.5"
+python-dotenv = "^1.0"
+
+[tool.poetry.group.dev.dependencies]
+pytest = "^7.4"
+pytest-django = "^4.7"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
