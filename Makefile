@@ -1,13 +1,25 @@
-.PHONY: help test deploy
+.PHONY: help install test lint run migrate
 
 help:
-	@echo "Команды:"
-	@echo "  make test    - Запустить тесты"
-	@echo "  make deploy  - Запустить деплой"
+	@echo "Available commands:"
+	@echo "  install    - Install dependencies"
+	@echo "  test       - Run tests"
+	@echo "  lint       - Run linter"
+	@echo "  run        - Run development server"
+	@echo "  migrate    - Run migrations"
+
+install:
+	pip install -r requirements.txt
 
 test:
-	poetry run python manage.py test
+	python manage.py test
+	pytest -v
 
-deploy:
-	@echo "Пуш в main запустит CI/CD"
-	git push origin main
+lint:
+	flake8 .
+
+run:
+	python manage.py runserver
+
+migrate:
+	python manage.py migrate
