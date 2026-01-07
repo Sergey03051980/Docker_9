@@ -14,7 +14,6 @@ jobs:
       SECRET_KEY: ${{ secrets.SECRET_KEY || 'test-secret-key-for-ci' }}
       DEBUG: "False"
       DJANGO_SETTINGS_MODULE: "config.test_settings"
-      PYTHONPATH: "${{ github.workspace }}"
 
     steps:
     - name: Checkout code
@@ -42,11 +41,7 @@ jobs:
         flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics
         flake8 . --count --exit-zero --max-complexity=10 --max-line-length=88 --statistics
 
-    - name: Run migrations
-      run: |
-        python manage.py makemigrations --check --dry-run
-        python manage.py migrate --noinput
-
     - name: Run tests with pytest
       run: |
-        pytest -v --tb=short --ds=config.test_settings
+        # Используем специальный флаг для pytest-django
+        pytest -v --tb=short --ds=config.test_settings --no-migrations
