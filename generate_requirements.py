@@ -2,8 +2,12 @@ import re
 
 def parse_poetry_lock():
     """Parse poetry.lock and extract package versions"""
-    with open('poetry.lock', 'r', encoding='utf-8') as f:
-        content = f.read()
+    try:
+        with open('poetry.lock', 'r', encoding='utf-8') as f:
+            content = f.read()
+    except FileNotFoundError:
+        print("poetry.lock not found, creating basic requirements")
+        return {}
     
     # Находим все пакеты и их версии
     packages = re.findall(r'name = "([^"]+)"\s+version = "([^"]+)"', content)
@@ -13,31 +17,35 @@ def parse_poetry_lock():
 def main():
     packages = parse_poetry_lock()
     
-    # Основные зависимости (исключаем dev и python)
+    # Основные зависимости
     main_packages = [
         'Django', 'djangorestframework', 'django-cors-headers',
         'celery', 'redis', 'psycopg2-binary', 'gunicorn',
         'django-celery-beat', 'python-dotenv'
     ]
     
-    # Dev зависимости
-    dev_packages = ['pytest', 'pytest-django']
+    # Dev зависимости (включая flake8)
+    dev_packages = ['pytest', 'pytest-django', 'flake8']
     
     # Пишем requirements.txt
     with open('requirements.txt', 'w') as f:
         for pkg in main_packages:
-            if pkg.lower() in packages:
-                f.write(f"{pkg}=={packages[pkg.lower()]}\n")
-            elif pkg in packages:
-                f.write(f"{pkg}=={packages[pkg]}\n")
+            pkg_lower = pkg.lower()
+            if pkg_lower in packages:
+                f.write(f"{pkg_lower}=={packages[pkg_lower]}\n")
+            else:
+                # Fallback если нет в poetry.lock
+                f.write(f"{pkg_lower}\n")
     
     # Пишем requirements-dev.txt
     with open('requirements-dev.txt', 'w') as f:
         for pkg in dev_packages:
-            if pkg.lower() in packages:
-                f.write(f"{pkg}=={packages[pkg.lower()]}\n")
-            elif pkg in packages:
-                f.write(f"{pkg}=={packages[pkg]}\n")
+            pkg_lower = pkg.lower()
+            if pkg_lower in packages:
+                f.write(f"{pkg_lower}=={packages[pkg_lower]}\n")
+            else:
+                # Fallback если нет в poetry.lock
+                f.write(f"{pkg_lower}\n")
     
     print("Generated requirements.txt and requirements-dev.txt")
 
