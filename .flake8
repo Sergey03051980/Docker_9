@@ -6,6 +6,7 @@ exclude =
     __pycache__,
     .venv,
     venv,
+    .env,
     env,
     migrations,
     staticfiles,
