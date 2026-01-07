@@ -1,136 +1,112 @@
-name: Deploy to Production
+name: Deploy to Production with Docker
 
 on:
   push:
     branches: [main]
-  workflow_dispatch:  # Позволяет запускать вручную
+  workflow_dispatch:
 
 jobs:
   test:
     runs-on: ubuntu-latest
     
     env:
-      SECRET_KEY: ${{ secrets.SECRET_KEY || 'test-secret-key-for-ci' }}
+      SECRET_KEY: ${{ secrets.SECRET_KEY || 'test-secret-key' }}
       DEBUG: "False"
       DJANGO_SETTINGS_MODULE: "config.test_settings"
-      PYTHONPATH: "${{ github.workspace }}"
 
     steps:
     - name: Checkout code
       uses: actions/checkout@v4
 
-    - name: Set up Python 3.11
+    - name: Set up Python
       uses: actions/setup-python@v4
       with:
         python-version: '3.11'
 
-    - name: Install dependencies
+    - name: Install all dependencies
       run: |
         python -m pip install --upgrade pip
         pip install -r requirements.txt
         pip install -r requirements-dev.txt
+        pip install flake8 pytest pytest-django
 
-    - name: Run migrations
+    - name: Run linter
       run: |
-        python manage.py makemigrations --check --dry-run
-        python manage.py migrate
+        flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics
+        flake8 . --count --exit-zero --max-complexity=10 --max-line-length=88 --statistics
 
-    - name: Run Django tests
+    - name: Run tests
       run: |
-        python manage.py test --verbosity=2 --failfast
+        python manage.py test --verbosity=2
+        pytest -v
 
-    - name: Run pytest
-      run: |
-        pytest -v --tb=short
-
-  deploy:
+  build-and-push:
     runs-on: ubuntu-latest
-    needs: test  # Запускать только после успешных тестов
-    if: github.ref == 'refs/heads/main'  # Только для main ветки
+    needs: test
+    if: github.ref == 'refs/heads/main'
     
     steps:
     - name: Checkout code
       uses: actions/checkout@v4
 
-    - name: Simulate deployment (no server configured)
-      if: ${{ !secrets.SERVER_HOST }}
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v2
+
+    - name: Build Docker image
       run: |
-        echo "⚠️  No server configured - running simulation"
-        echo "To enable real deployment, add SERVER_HOST, SERVER_USER, and SSH_PRIVATE_KEY secrets"
-        ./scripts/simulate_deploy.sh
-        
-    - name: Real deployment to server
-      if: ${{ secrets.SERVER_HOST && secrets.SERVER_USER && secrets.SSH_PRIVATE_KEY }}
+        docker build -t docker-9:latest .
+
+  deploy:
+    runs-on: ubuntu-latest
+    needs: build-and-push
+    if: github.ref == 'refs/heads/main'
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Deploy to Yandex Cloud via SSH
       uses: appleboy/ssh-action@v0.1.5
-      env:
-        DEPLOY_MESSAGE: "Deploying commit ${{ github.sha }} to production"
       with:
         host: ${{ secrets.SERVER_HOST }}
         username: ${{ secrets.SERVER_USER }}
         key: ${{ secrets.SSH_PRIVATE_KEY }}
         script: |
-          echo "$DEPLOY_MESSAGE"
-          echo "======================================"
+          echo "🚀 Starting Docker deployment..."
           
           # Переходим в директорию проекта
           cd /opt/docker-9
           
-          # Обновляем код из репозитория
-          echo "Pulling latest code..."
+          # Останавливаем старые контейнеры
+          echo "Stopping old containers..."
+          docker-compose -f docker-compose.prod.yml down
+          
+          # Обновляем код
+          echo "Updating code..."
           git fetch origin
           git reset --hard origin/main
           
-          # Активируем виртуальное окружение
-          echo "Activating virtual environment..."
-          source venv/bin/activate
+          # Копируем .env файл если нужно
+          if [ ! -f ".env" ]; then
+            cp .env.example .env
+            echo "⚠️  Please update .env file with actual values!"
+          fi
           
-          # Обновляем зависимости
-          echo "Installing dependencies..."
-          pip install -r requirements.txt
+          # Поднимаем контейнеры
+          echo "Starting containers..."
+          docker-compose -f docker-compose.prod.yml up -d --build
           
-          # Применяем миграции
+          # Выполняем миграции
           echo "Running migrations..."
-          python manage.py migrate
+          docker-compose -f docker-compose.prod.yml exec web python manage.py migrate
           
-          # Собираем статические файлы
+          # Собираем статику
           echo "Collecting static files..."
-          python manage.py collectstatic --noinput --clear
-          
-          # Перезапускаем сервисы
-          echo "Restarting services..."
-          sudo systemctl restart gunicorn
-          sudo systemctl reload nginx
+          docker-compose -f docker-compose.prod.yml exec web python manage.py collectstatic --noinput
           
           # Проверяем статус
-          echo "Checking service status..."
-          sudo systemctl status gunicorn --no-pager
+          echo "Checking containers..."
+          docker-compose -f docker-compose.prod.yml ps
           
-          echo "======================================"
           echo "✅ Deployment completed successfully!"
-          echo "Application is live at: http://${{ secrets.SERVER_HOST }}"
-          
-    - name: Send deployment summary
-      if: always()
-      run: |
-        echo "=== Deployment Summary ==="
-        echo "Repository: ${{ github.repository }}"
-        echo "Branch: ${{ github.ref }}"
-        echo "Commit: ${{ github.sha }}"
-        echo "Actor: ${{ github.actor }}"
-        echo "Event: ${{ github.event_name }}"
-        echo "Workflow: ${{ github.workflow }}"
-        echo "Job Status: ${{ job.status }}"
-        echo ""
-        
-        if [ "${{ secrets.SERVER_HOST }}" == "" ]; then
-          echo "ℹ️  Real deployment disabled - no server secrets configured"
-          echo "To enable real deployment, add:"
-          echo "  - SERVER_HOST"
-          echo "  - SERVER_USER" 
-          echo "  - SSH_PRIVATE_KEY"
-          echo ""
-          echo "See DEPLOYMENT_GUIDE.md for setup instructions"
-        else
-          echo "✅ Real deployment enabled"
-          echo "Server: ${{ secrets.SERVER_HOST }}"
-        fi
+          echo "🌐 Application is live at: http://${{ secrets.SERVER_HOST }}"
